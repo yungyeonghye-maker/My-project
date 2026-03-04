@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # 페이지 설정
@@ -25,7 +24,7 @@ st.markdown("""
     [data-testid="stMetricLabel"] { font-size: 14px !important; color: #555 !important; margin-bottom: 8px !important; }
     [data-testid="stMetricValue"] { font-size: 24px !important; color: #003366 !important; font-weight: 700 !important; }
     </style>
-    <div class="main-title">담보 주식 수 대시보드</div>
+    <div class="main-title">담보 주식 수 관리 대시보드</div>
     """, unsafe_allow_html=True)
 
 # --- 사이드바 ---
@@ -36,14 +35,28 @@ st.sidebar.markdown(f"<div style='color: #0056b3; font-size: 18px; font-weight: 
 stock_symbol = st.sidebar.text_input("말레이시아 주식 티커", value="5238")
 
 today = datetime.now()
-default_start = today - timedelta(days=7)
-date_range = st.sidebar.date_input("VWAP 계산 기간", value=(default_start, today))
+# 1. 예치 VWAP 기간 설정
+st.sidebar.subheader("📅 예치 VWAP 기간")
+deposit_date_range = st.sidebar.date_input("예치용 시작/종료일", value=(today - timedelta(days=7), today), key='deposit_date')
+
+# 2. 평가 VWAP 기간 설정
+st.sidebar.subheader("📅 평가 VWAP 기간")
+eval_date_range = st.sidebar.date_input("평가용 시작/종료일", value=(today - timedelta(days=1), today), key='eval_date')
 
 full_ticker = f"{stock_symbol.zfill(4)}.KL" if not stock_symbol.endswith(".KL") else stock_symbol
 
+def calculate_vwap(data, date_range):
+    """특정 기간의 5일 가중평균(VWAP) 계산 함수"""
+    mask = (data.index.date >= date_range[0]) & (data.index.date <= date_range[1])
+    target_df = data.loc[mask].copy()
+    if target_df.empty:
+        return 0
+    vwap = (target_df['Close'] * target_df['Volume']).sum() / target_df['Volume'].sum()
+    return vwap
+
 try:
-    # 데이터 다운로드 (충분한 기간 확보를 위해 1mo)
-    raw_df = yf.download(full_ticker, period="1mo", interval="1d")
+    # 데이터 다운로드 (충분한 기간 확보를 위해 3mo)
+    raw_df = yf.download(full_ticker, period="3mo", interval="1d")
     fx_raw = yf.download("USDMYR=X", period="5d")
     
     if raw_df.empty:
@@ -53,65 +66,50 @@ try:
         if isinstance(df_all.columns, pd.MultiIndex):
             df_all.columns = df_all.columns.get_level_values(0)
         
-        # 선택 기간 필터링
-        mask = (df_all.index.date >= date_range[0]) & (df_all.index.date <= date_range[1])
-        df = df_all.loc[mask].copy()
-
+        # 환율 설정
         try: default_fx = float(fx_raw['Close'].iloc[-1])
         except: default_fx = 4.4500
         input_fx = st.sidebar.number_input("적용 환율 (USD/MYR)", value=default_fx, format="%.4f")
 
-        if not df.empty:
-            # 1. VWAP (MYR) 계산
-            vwap_val = (df['Close'] * df['Volume']).sum() / df['Volume'].sum()
+        # --- 핵심 로직 계산 ---
+        
+        # 1. 예치 VWAP (MYR)
+        deposit_vwap = calculate_vwap(df_all, deposit_date_range)
+        
+        # 2. 평가 VWAP (MYR)
+        eval_vwap = calculate_vwap(df_all, eval_date_range)
+        
+        if deposit_vwap > 0 and eval_vwap > 0:
+            # 3. 담보 주식 수 = (채권 잔액 * 환율 * 115%) / 예치 VWAP
+            required_shares = (bond_balance_usd * input_fx * 1.15) / deposit_vwap
             
-            # 2. 담보 주식 수 (목표 비율 115% 기준 필요량)
-            required_shares = (bond_balance_usd * input_fx * 1.15) / vwap_val
-            
-            # 3. Stock Price (선택 기간 마지막 날 종가)
-            last_close_price = float(df['Close'].iloc[-1])
-            
-            # 4. 채권 대비 % (LTV) 계산 
-            # 수식: (담보 주식 수 * 마지막 종가) / (채권 잔액 * 환율) * 100
-            collateral_ratio = (int(required_shares) * last_close_price) / (bond_balance_usd * input_fx) * 100
+            # 4. 채권 대비 % (LTV) = (담보 주식 수 * 평가 VWAP) / (채권 잔액 * 환율) * 100
+            collateral_ratio = (required_shares * eval_vwap) / (bond_balance_usd * input_fx) * 100
 
-            # --- 상단 지표 박스 섹션 (4열 구성) ---
+            # --- 상단 지표 박스 섹션 ---
             st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
             m1, m2, m3, m4 = st.columns(4)
-            with m1: st.metric("VWAP (MYR)", f"{vwap_val:.4f}")
+            with m1: st.metric("예치 VWAP (MYR)", f"{deposit_vwap:.4f}")
             with m2: st.metric("담보 주식 수", f"{int(required_shares):,} 주")
-            with m3: st.metric("Stock Price", f"{last_close_price:.3f}")
+            with m3: st.metric("평가 VWAP (MYR)", f"{eval_vwap:.4f}")
             with m4: st.metric("채권 대비 %", f"{collateral_ratio:.2f}%")
 
             st.markdown("<hr style='border: 0.5px solid #d1e3ff; margin: 30px 0;'>", unsafe_allow_html=True)
+            
+            # 차트가 삭제된 자리에 상세 데이터 테이블만 배치
+            st.subheader("📋 데이터 요약 정보")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write("**[예치 기간 데이터]**")
+                mask_dep = (df_all.index.date >= deposit_date_range[0]) & (df_all.index.date <= deposit_date_range[1])
+                st.dataframe(df_all.loc[mask_dep, ['Close', 'Volume']].style.format("{:,.2f}"), use_container_width=True)
+            with col_b:
+                st.write("**[평가 기간 데이터]**")
+                mask_eval = (df_all.index.date >= eval_date_range[0]) & (df_all.index.date <= eval_date_range[1])
+                st.dataframe(df_all.loc[mask_eval, ['Close', 'Volume']].style.format("{:,.2f}"), use_container_width=True)
 
-            # --- 차트 섹션 ---
-            c_left, c_right = st.columns(2)
-            date_labels = df.index.strftime('%y-%m-%d').tolist()
-
-            def get_layout(title):
-                return dict(
-                    title=dict(text=title, font=dict(size=16, color='#004080')),
-                    margin=dict(l=10, r=10, t=50, b=10), height=320,
-                    plot_bgcolor='white', paper_bgcolor='rgba(0,0,0,0)',
-                    xaxis=dict(tickformat='%y-%m-%d', type='category', gridcolor='#f0f5ff'),
-                    yaxis=dict(gridcolor='#f0f5ff', autorange=True), showlegend=False
-                )
-
-            with c_left:
-                fig_p = go.Figure(go.Scatter(x=date_labels, y=df['Close'], mode='lines+markers', line=dict(color='#0056b3', width=2.5)))
-                fig_p.update_layout(get_layout("📈 Stock Price (MYR)"))
-                st.plotly_chart(fig_p, use_container_width=True)
-
-            with c_right:
-                fig_v = go.Figure(go.Bar(x=date_labels, y=df['Volume'] / 1000000, marker_color='#66b2ff'))
-                fig_v.update_layout(get_layout("📊 Trading Volume (Million)"))
-                st.plotly_chart(fig_v, use_container_width=True)
-
-            with st.expander("📝 상세 데이터 보기"):
-                df_display = df[['Close', 'Volume']].copy()
-                df_display.index = df_display.index.strftime('%y-%m-%d')
-                st.dataframe(df_display.style.format("{:,.2f}"), use_container_width=True)
+        else:
+            st.warning("선택한 기간에 해당하는 주식 데이터가 없습니다. 날짜를 조정해 주세요.")
 
 except Exception as e:
     st.error(f"데이터 로드 중 오류 발생: {e}")
