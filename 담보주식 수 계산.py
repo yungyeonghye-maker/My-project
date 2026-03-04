@@ -20,7 +20,7 @@ st.markdown("""
         background-color: #ffffff; 
         border: 1px solid #d1e3ff; 
         border-radius: 12px; 
-        padding: 25px 20px !important; /* 상하 여백을 25px로 늘려 박스 크기 확대 */
+        padding: 25px 20px !important; 
         box-shadow: 2px 4px 12px rgba(0,51,102,0.08); 
         transition: all 0.3s ease;
     }
@@ -29,7 +29,6 @@ st.markdown("""
         box-shadow: 2px 6px 15px rgba(0,51,102,0.12);
     }
     
-    /* 메트릭 내부 텍스트 간격 조절 */
     [data-testid="stMetricLabel"] { font-size: 15px !important; color: #555 !important; margin-bottom: 10px !important; }
     [data-testid="stMetricValue"] { font-size: 28px !important; color: #003366 !important; font-weight: 700 !important; }
 
@@ -70,15 +69,22 @@ try:
         input_fx = st.sidebar.number_input("적용 환율 (USD/MYR)", value=default_fx, format="%.4f")
 
         if not df.empty:
+            # VWAP 계산
             vwap_val = (df['Close'] * df['Volume']).sum() / df['Volume'].sum()
+            
+            # 필요 담보 주식 수 계산 (목표 비율 115%)
             required_shares = (bond_balance_usd * input_fx * 1.15) / vwap_val
+            
+            # 채권 대비 % 계산 (LTV)
+            # 수식: (필요 주식 수 * VWAP) / (채권 잔액 * 환율) * 100
+            collateral_ratio = (required_shares * vwap_val) / (bond_balance_usd * input_fx) * 100
 
             # --- 상단 지표 박스 섹션 ---
             st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
             m1, m2, m3 = st.columns(3)
-            with m1: st.metric("적용 환율", f"{input_fx:.4f}")
-            with m2: st.metric("선택 기간 VWAP (MYR)", f"{vwap_val:.4f}")
-            with m3: st.metric("필요 담보 주식 수", f"{int(required_shares):,} 주")
+            with m1: st.metric("선택 기간 VWAP (MYR)", f"{vwap_val:.4f}")
+            with m2: st.metric("필요 담보 주식 수", f"{int(required_shares):,} 주")
+            with m3: st.metric("채권 대비 % (LTV)", f"{collateral_ratio:.1f}%")
 
             st.markdown("<hr style='border: 0.5px solid #d1e3ff; margin: 30px 0;'>", unsafe_allow_html=True)
 
